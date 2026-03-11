@@ -4,9 +4,10 @@ app.py \u2014 Flask application entry point.
 Registers all blueprints, configures CORS and session settings,
 and starts the development server when run directly.
 """
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
 import os
+import traceback
 
 from routes.question_routes import question_bp
 from routes.auth_routes import auth_bp
@@ -50,6 +51,21 @@ app.register_blueprint(question_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(actions_bp)
 app.register_blueprint(admin_bp)
+
+# Global error handler — always return JSON, never HTML
+@app.errorhandler(Exception)
+def handle_exception(e):
+    tb = traceback.format_exc()
+    print(f"[UNHANDLED ERROR] {e}\n{tb}")
+    return jsonify({"error": str(e), "traceback": tb}), 500
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify({"error": str(e)}), 500
 
 # ── Nightly RTU push scheduler (INACTIVE) ──────────────────────────────────────
 # To activate: pip install APScheduler, then uncomment the two lines below.
