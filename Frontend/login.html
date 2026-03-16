@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Internal Data Utility</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="tailwind.min.css">
+    <link rel="icon" href="data:,">
     <style>
         :root {
             --brand-orange: #FF6B00;
@@ -73,78 +74,6 @@
             box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.1);
         }
 
-        .user-selector {
-            margin-bottom: 24px;
-        }
-
-        .user-selector label {
-            display: block;
-            font-weight: 600;
-            margin-bottom: 12px;
-            font-size: 14px;
-        }
-
-        .user-option {
-            display: flex;
-            align-items: center;
-            padding: 12px;
-            margin-bottom: 10px;
-            border: 2px solid #E2E8F0;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .user-option:hover {
-            border-color: var(--brand-orange);
-            background-color: #FFF5F0;
-        }
-
-        .user-option input[type="radio"] {
-            margin-right: 12px;
-            cursor: pointer;
-            width: 20px;
-            height: 20px;
-        }
-
-        .user-info {
-            flex-grow: 1;
-        }
-
-        .user-info .username {
-            font-weight: 600;
-            color: #1A1A1B;
-        }
-
-        .user-info .role-badge {
-            display: inline-block;
-            font-size: 11px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            margin-top: 4px;
-            font-weight: 600;
-        }
-
-        .role-editor {
-            background-color: #E0F2FE;
-            color: #0369A1;
-        }
-
-        .role-reviewer {
-            background-color: #FEF3C7;
-            color: #92400E;
-        }
-
-        .role-admin {
-            background-color: #F0FDF4;
-            color: #15803D;
-        }
-
-        .role-senior-editor {
-            background-color: #F3E8FF;
-            color: #7C3AED;
-        }
-
         .login-button {
             width: 100%;
             padding: 12px 24px;
@@ -198,9 +127,6 @@
         <form id="loginForm">
             <!-- Error Message -->
             <div id="errorMessage" style="color: #DC2626; font-size: 12px; margin-bottom: 16px; padding: 8px; background: #FEE2E2; border-radius: 4px; display: none;"></div>
-
-            <!-- Available Users -->
-            <div id="userSelector" class="user-selector"></div>
 
             <!-- Manual Username/Email Input -->
             <div class="input-group">
@@ -258,8 +184,6 @@
                     return;
                 }
                 
-                // Show available users for quick login
-                showAvailableUsers(allUsers);
                 document.getElementById('errorMessage').textContent = '';
                 
             } catch (err) {
@@ -271,35 +195,6 @@
                     Error: ${err.message}
                 `;
             }
-        }
-
-        function showAvailableUsers(users) {
-            const userSelector = document.getElementById('userSelector');
-            userSelector.innerHTML = '<label><strong>Quick Select User:</strong></label>';
-            
-            users.forEach(user => {
-                const option = document.createElement('div');
-                option.className = 'user-option';
-                const pendingBadge = user.is_pending ? ' <span style="color: #DC2626; font-weight: 600;">(Pending Approval)</span>' : '';
-                option.innerHTML = `
-                    <input type="radio" name="selectedUser" value="${user.id}" id="user_${user.id}" ${user.is_pending ? 'disabled' : ''}>
-                    <div class="user-info">
-                        <div class="username">${user.username}${pendingBadge}</div>
-                        <span class="role-badge role-${user.role.toLowerCase().replace(/\s+/g, '-')}">${user.role}</span>
-                    </div>
-                `;
-                option.onclick = () => {
-                    if (!user.is_pending) {
-                        document.getElementById(`user_${user.id}`).checked = true;
-                        document.getElementById('usernameInput').value = user.username;
-                    }
-                };
-                if (user.is_pending) {
-                    option.style.opacity = '0.6';
-                    option.style.cursor = 'not-allowed';
-                }
-                userSelector.appendChild(option);
-            });
         }
 
         // Handle login form submission

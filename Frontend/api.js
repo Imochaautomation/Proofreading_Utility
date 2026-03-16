@@ -1,4 +1,10 @@
-const API_BASE = window.location.origin + "/api";
+const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const frontendDevPorts = ['3000', '5500', '8000'];
+const backendOrigin = (isLocalHost && frontendDevPorts.includes(window.location.port))
+    ? `${window.location.protocol}//${window.location.hostname}:5000`
+    : window.location.origin;
+
+const API_BASE = `${backendOrigin}/api`;
 console.log("✅ api.js loaded, API_BASE:", API_BASE);
 
 // =====================================================
@@ -49,10 +55,28 @@ async function getCurrentUser() {
 // =====================================================
 async function fetchQBs() {
     try {
-        const res = await fetch(`${API_BASE}/question-banks`);
+        // Load a larger window of QB names for the typeahead list.
+        const res = await fetch(`${API_BASE}/question-banks?limit=20000`);
         return await res.json();
     } catch (err) {
         console.error("fetchQBs() error:", err);
+        throw err;
+    }
+}
+
+async function searchQuestionBanks(searchTerm, limit = 50) {
+    try {
+        const params = new URLSearchParams({
+            search: searchTerm || '',
+            limit: String(limit)
+        });
+        const res = await fetch(`${API_BASE}/question-banks?${params.toString()}`);
+        if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        return await res.json();
+    } catch (err) {
+        console.error("searchQuestionBanks() error:", err);
         throw err;
     }
 }

@@ -40,7 +40,6 @@ def _resolve_session_from_header():
         return False
     
     try:
-        from bson import ObjectId
         auth_db = get_authorization_db()
         user = auth_db['users'].find_one(
             {'_id': ObjectId(user_id_header), 'is_active': True},

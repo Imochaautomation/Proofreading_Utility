@@ -1,6 +1,9 @@
 let questions = [];
 let allQBs = [];
 let currentUser = null;
+let isSavingQuestion = false;
+let isReviewingQuestion = false;
+const queueReviewInFlight = new Set();
 
 
 function showLoader() {
@@ -39,10 +42,10 @@ function renderChangesSection(changes) {
             <div class="bg-white p-2 rounded border border-yellow-200">
                 <div class="font-semibold text-gray-700">${escapeHTML(field)}:</div>
                 <div class="text-red-600 line-through text-xs mt-1">
-                    <span class="font-semibold">Was:</span> ${escapeHTML(truncateValue(original))}
+                    <span class="font-semibold">Was:</span> ${formatForDisplay(truncateValue(original))}
                 </div>
                 <div class="text-green-600 text-xs mt-1">
-                    <span class="font-semibold">Now:</span> ${escapeHTML(truncateValue(modified))}
+                    <span class="font-semibold">Now:</span> ${formatForDisplay(truncateValue(modified))}
                 </div>
             </div>
         `;
@@ -72,14 +75,15 @@ async function checkAuthentication() {
         // Display user info in header
         document.getElementById('userDisplay').textContent = currentUser.username;
         const roleEl = document.getElementById('roleDisplay');
+        const roleDisplay = toRoleDisplay(currentUser.role);
         const _roleBadgeColors = { 'Admin': 'bg-red-100 text-red-700', 'Senior Editor': 'bg-purple-100 text-purple-700', 'Editor': 'bg-blue-100 text-blue-700' };
-        roleEl.innerHTML = `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${_roleBadgeColors[currentUser.role] || 'bg-gray-100 text-gray-600'}">${currentUser.role}</span>`;
+        roleEl.innerHTML = `<span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${_roleBadgeColors[roleDisplay] || 'bg-gray-100 text-gray-600'}">${roleDisplay}</span>`;
 
         // Show pending requests button only for Admins
         try {
             const pendingBtn = document.getElementById('pendingReqBtn');
             if (pendingBtn) {
-                if (currentUser.role === 'Admin') pendingBtn.classList.remove('hidden');
+                if (hasAnyRole(currentUser, ['Admin'])) pendingBtn.classList.remove('hidden');
                 else pendingBtn.classList.add('hidden');
             }
         } catch (e) {
@@ -90,7 +94,7 @@ async function checkAuthentication() {
         try {
             const backfillBtn = document.getElementById('btnBackfillAudit');
             if (backfillBtn) {
-                if (currentUser.role === 'Admin') backfillBtn.classList.remove('hidden');
+                if (hasAnyRole(currentUser, ['Admin'])) backfillBtn.classList.remove('hidden');
                 else backfillBtn.classList.add('hidden');
             }
         } catch (e) {
@@ -101,7 +105,7 @@ async function checkAuthentication() {
         try {
             const batchPushBtn = document.getElementById('batchPushBtn');
             if (batchPushBtn) {
-                if (currentUser.role === 'Admin') batchPushBtn.classList.remove('hidden');
+                if (hasAnyRole(currentUser, ['Admin'])) batchPushBtn.classList.remove('hidden');
                 else batchPushBtn.classList.add('hidden');
             }
         } catch (e) {
@@ -162,6 +166,46 @@ function escapeHTML(str) {
     return div.innerHTML;
 }
 
+function getNormalizedRole(role) {
+    return String(role || '').trim().toLowerCase();
+}
+
+function hasAnyRole(user, roles) {
+    const normalized = getNormalizedRole(user?.role);
+    return roles.map(r => getNormalizedRole(r)).includes(normalized);
+}
+
+function toRoleDisplay(role) {
+    const normalized = getNormalizedRole(role);
+    if (normalized === 'admin') return 'Admin';
+    if (normalized === 'senior editor') return 'Senior Editor';
+    if (normalized === 'editor') return 'Editor';
+    return String(role || 'Unknown').trim() || 'Unknown';
+}
+
+function normalizeQBName(name) {
+    return String(name || '')
+        .replace(/&amp;/gi, '&')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function formatForDisplay(value) {
+    if (value === null || value === undefined) return '';
+
+    const asString = String(value)
+        .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+        .replace(/<\s*\/p\s*>/gi, '\n')
+        .replace(/<\s*\/div\s*>/gi, '\n')
+        .replace(/<[^>]*>/g, '');
+
+    return escapeHTML(asString)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, '<br>');
+}
+
 // -------------------------------
 // Load Question Banks
 // -------------------------------
@@ -195,17 +239,44 @@ async function loadQBs() {
 async function loadQuestionsByQB() {
     try {
         const input = document.getElementById("qbInput");
-        const typedValue = input.value.trim().toLowerCase();
+        const typedRaw = input.value.trim();
+        const typedValue = typedRaw.toLowerCase();
+        const typedNormalized = normalizeQBName(typedRaw);
 
         if (!typedValue) {
             alert("Please enter a Question Bank name.");
             return;
         }
 
-        // ✅ Allow partial match instead of exact match
-        const matchedQB = allQBs.find(qb =>
-            qb.name.toLowerCase().includes(typedValue)
-        );
+        // Prefer exact normalized match, then partial local match.
+        let matchedQB = allQBs.find(qb => normalizeQBName(qb.name) === typedNormalized)
+            || allQBs.find(qb => normalizeQBName(qb.name).includes(typedNormalized))
+            || allQBs.find(qb => qb.name.toLowerCase().includes(typedValue));
+
+        // If not in preloaded list, query backend to cover banks outside initial load.
+        if (!matchedQB) {
+            try {
+                const serverMatches = await searchQuestionBanks(typedRaw, 100);
+                const normalizedServer = (serverMatches || []).map(qb => ({
+                    id: qb.id,
+                    name: String(qb.name || '').trim()
+                }));
+
+                matchedQB = normalizedServer.find(qb => normalizeQBName(qb.name) === typedNormalized)
+                    || normalizedServer.find(qb => normalizeQBName(qb.name).includes(typedNormalized))
+                    || normalizedServer.find(qb => qb.name.toLowerCase().includes(typedValue));
+
+                if (matchedQB && !allQBs.some(qb => qb.id === matchedQB.id)) {
+                    allQBs.push(matchedQB);
+                    const datalist = document.getElementById("qbList");
+                    const option = document.createElement("option");
+                    option.value = matchedQB.name;
+                    datalist.appendChild(option);
+                }
+            } catch (searchErr) {
+                console.warn('QB server-side search failed:', searchErr);
+            }
+        }
 
         if (!matchedQB) {
             alert(allQBs.length === 0
@@ -368,7 +439,7 @@ function renderQuestionList(questionArray) {
         const listItem = document.createElement('div');
         listItem.className = 'p-2 border rounded cursor-pointer hover:bg-gray-50 text-sm font-medium';
         listItem.textContent = question.displayId;
-        listItem.onclick = () => scrollToQuestion(question.id);
+        listItem.onclick = () => scrollToQuestion(question.displayId);
         resultList.appendChild(listItem);
 
         // STATUS BADGE
@@ -406,24 +477,24 @@ if (question.status === "Completed") {
                     ${question.status === 'Completed' ? `<div class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded mt-1 inline-block">Completed</div>` : question.isEdited ? `<div class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded mt-1 inline-block">Edited</div>` : ''}
                 </div>
 
-                <button class="edit-btn bg-[#FF6B00] hover:bg-[#E66000] text-white text-xs font-semibold px-3 py-1.5 rounded-md transition" data-qid="${escapeHTML(question.displayId)}">
+                <button class="edit-btn orange-button text-white text-xs font-semibold px-3 py-1.5 rounded-md" data-qid="${escapeHTML(question.displayId)}">
                     Edit
                 </button>
             </div>
 
             <div class="mb-3 font-medium">
-                Q: ${escapeHTML(question.question)}
+                Q: ${formatForDisplay(question.question)}
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
-                <div>A) ${escapeHTML(question.options.A)}</div>
-                <div>B) ${escapeHTML(question.options.B)}</div>
-                <div>C) ${escapeHTML(question.options.C)}</div>
-                <div>D) ${escapeHTML(question.options.D)}</div>
+                <div>A) ${formatForDisplay(question.options.A)}</div>
+                <div>B) ${formatForDisplay(question.options.B)}</div>
+                <div>C) ${formatForDisplay(question.options.C)}</div>
+                <div>D) ${formatForDisplay(question.options.D)}</div>
             </div>
 
             <div class="bg-gray-50 p-3 rounded text-sm mb-3">
-                <strong>Explanation:</strong> ${escapeHTML(question.explanation)}
+                <strong>Explanation:</strong> ${formatForDisplay(question.explanation)}
             </div>
 
             ${question.isEdited && Object.keys(question.changes).length > 0 ? renderChangesSection(question.changes) : ''}
@@ -507,9 +578,10 @@ function selectQuestion(id) {
     window.currentQuestionId = id;
     window.currentQBId   = q.qbId   || null;
     window.currentQBName = q.bank   || null;
+    setSaveProgress(false);
     
     // Set read-only based on role (Editor, Senior Editor and Admin can edit)
-    const canEdit = currentUser && (currentUser.role === 'Editor' || currentUser.role === 'Senior Editor' || currentUser.role === 'Admin');
+    const canEdit = hasAnyRole(currentUser, ['Editor', 'Senior Editor', 'Admin']);
     setReadOnlyMode(!canEdit);
     
     // Show/hide action buttons based on role
@@ -517,21 +589,18 @@ function selectQuestion(id) {
     const btnReview = document.getElementById('btnReview');
     const btnPushRTU = document.getElementById('btnPushRTU');
     
-    // Hide all buttons first
-    btnSave.classList.add('hidden');
-    btnReview.classList.add('hidden');
-    btnPushRTU.classList.add('hidden');
-    
-    // Show save button for Editor, Senior Editor and Admin
-    if (currentUser.role === 'Editor' || currentUser.role === 'Senior Editor' || currentUser.role === 'Admin') {
-        btnSave.classList.remove('hidden');
-    }
-    
-    // Show review and push buttons for Admin, Senior Editor, and Editor
-    if (currentUser.role === 'Admin' || currentUser.role === 'Senior Editor' || currentUser.role === 'Editor') {
-        btnReview.classList.remove('hidden');
-        btnPushRTU.classList.remove('hidden');
-    }
+    // Keep buttons visible; disable when role is not authorized so users can understand why action is unavailable.
+    btnSave.classList.remove('hidden');
+    btnReview.classList.remove('hidden');
+    btnPushRTU.classList.remove('hidden');
+
+    [btnSave, btnReview, btnPushRTU].forEach(btn => {
+        if (!btn) return;
+        btn.disabled = !canEdit;
+        btn.classList.toggle('opacity-50', !canEdit);
+        btn.classList.toggle('cursor-not-allowed', !canEdit);
+        btn.title = canEdit ? '' : 'Your role does not allow editing/review actions.';
+    });
 }
 
 
@@ -710,7 +779,7 @@ async function prevPage() {
 // REVIEW QUEUE
 // =====================================================
 async function loadReviewQueueCount() {
-    if (!currentUser || (currentUser.role !== 'Admin' && currentUser.role !== 'Senior Editor')) return;
+    if (!currentUser || !hasAnyRole(currentUser, ['Admin', 'Senior Editor'])) return;
     try {
         const queue = await fetchReviewQueue();
         const count = Array.isArray(queue) ? queue.length : 0;
@@ -729,7 +798,7 @@ async function loadReviewQueueCount() {
 }
 
 async function showReviewQueue() {
-    if (!currentUser || (currentUser.role !== 'Admin' && currentUser.role !== 'Senior Editor')) {
+    if (!currentUser || !hasAnyRole(currentUser, ['Admin', 'Senior Editor'])) {
         alert('Access denied');
         return;
     }
@@ -896,8 +965,14 @@ async function pushFromQueue(queId, btn) {
 }
 
 async function markCompleteFromQueue(queId, btn) {
+    if (queueReviewInFlight.has(queId)) return;
     if (!confirm(`Mark QID-${queId} as Complete?`)) return;
-    if (btn) { btn.disabled = true; btn.textContent = 'Marking...'; }
+    queueReviewInFlight.add(queId);
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Marking...';
+        btn.classList.add('opacity-70', 'cursor-not-allowed');
+    }
     try {
         await reviewQuestion(queId);
         // Fade-remove the row
@@ -917,7 +992,13 @@ async function markCompleteFromQueue(queId, btn) {
     } catch (err) {
         console.error('markCompleteFromQueue error:', err);
         alert('Failed to mark as complete: ' + (err.message || err));
-        if (btn) { btn.disabled = false; btn.textContent = '✅ Mark Complete'; }
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '✅ Mark Complete';
+            btn.classList.remove('opacity-70', 'cursor-not-allowed');
+        }
+    } finally {
+        queueReviewInFlight.delete(queId);
     }
 }
 
@@ -925,7 +1006,7 @@ async function markCompleteFromQueue(queId, btn) {
 // ADMIN: Show pending signup requests (modal)
 // =====================================================
 async function showPendingRequests() {
-    if (!currentUser || currentUser.role !== 'Admin') {
+    if (!currentUser || !hasAnyRole(currentUser, ['Admin'])) {
         alert('Only Admins can view pending requests');
         return;
     }
@@ -1000,7 +1081,7 @@ async function handleRejectRequest(userId) {
 // ADMIN: Backfill audit logs (calls backend backfill endpoint)
 // =====================================================
 async function handleBackfillEdits() {
-    if (!currentUser || currentUser.role !== 'Admin') {
+    if (!currentUser || !hasAnyRole(currentUser, ['Admin'])) {
         alert('Only Admins can run audit backfill');
         return;
     }
@@ -1042,8 +1123,71 @@ function showToast(message, type = 'success') {
     }, 3500);
 }
 
+function setSaveProgress(isSaving, message = 'Saving changes...') {
+    const wrap = document.getElementById('saveProgressWrap');
+    const text = document.getElementById('saveProgressText');
+    const saveBtn = document.getElementById('btnSave');
+    const reviewBtn = document.getElementById('btnReview');
+    const pushBtn = document.getElementById('btnPushRTU');
+
+    if (wrap) {
+        wrap.classList.toggle('hidden', !isSaving);
+    }
+    if (text) {
+        text.textContent = message;
+    }
+    if (saveBtn) {
+        saveBtn.disabled = isSaving;
+        saveBtn.textContent = isSaving ? 'Saving...' : 'Save Changes';
+        saveBtn.classList.toggle('opacity-70', isSaving);
+        saveBtn.classList.toggle('cursor-not-allowed', isSaving);
+    }
+    if (reviewBtn) {
+        reviewBtn.disabled = isSaving;
+    }
+    if (pushBtn) {
+        pushBtn.disabled = isSaving;
+    }
+}
+
+function setReviewProgress(isReviewing, message = 'Marking question as complete...') {
+    const wrap = document.getElementById('saveProgressWrap');
+    const text = document.getElementById('saveProgressText');
+    const reviewBtn = document.getElementById('btnReview');
+    const saveBtn = document.getElementById('btnSave');
+    const pushBtn = document.getElementById('btnPushRTU');
+
+    if (wrap) {
+        wrap.classList.toggle('hidden', !isReviewing);
+    }
+    if (text && isReviewing) {
+        text.textContent = message;
+    }
+    if (reviewBtn) {
+        reviewBtn.disabled = isReviewing;
+        reviewBtn.textContent = isReviewing ? 'Marking...' : 'Mark as Complete';
+        reviewBtn.classList.toggle('opacity-70', isReviewing);
+        reviewBtn.classList.toggle('cursor-not-allowed', isReviewing);
+    }
+    if (saveBtn) {
+        saveBtn.disabled = isReviewing || isSavingQuestion;
+    }
+    if (pushBtn) {
+        pushBtn.disabled = isReviewing;
+    }
+}
+
 async function handleSaveQuestion() {
     if (!currentUser) { showToast('Please log in.', 'error'); return; }
+
+    if (isSavingQuestion) {
+        return;
+    }
+
+    const saveBtn = document.getElementById('btnSave');
+    if (saveBtn && saveBtn.disabled) {
+        return;
+    }
     
     try {
         const questionId = window.currentQuestionId;
@@ -1077,7 +1221,10 @@ async function handleSaveQuestion() {
             return;
         }
 
-        const response = await saveQuestion(questionId, updatedData);
+        isSavingQuestion = true;
+        setSaveProgress(true, 'Saving changes to utility. Please wait...');
+
+        await saveQuestion(questionId, updatedData);
         showToast('Question saved successfully!', 'success');
 
         // Fetch the updated question from backend (will include changes info)
@@ -1125,10 +1272,15 @@ async function handleSaveQuestion() {
             // Re-render just this question card
             reRenderSingleQuestion(normalizedQuestion);
 
-            // Close editor after successful save
-            setTimeout(() => {
-                document.getElementById('mainEditor').classList.add('hidden');
-            }, 500);
+            // Refresh dirty baseline so repeated saves only occur after new edits.
+            window.originalFormValues = {
+                question: updatedData.question,
+                optionA: updatedData.optionA,
+                optionB: updatedData.optionB,
+                optionC: updatedData.optionC,
+                optionD: updatedData.optionD,
+                explanation: updatedData.explanation
+            };
         }
     } catch (err) {
         console.error('Error saving question:', err);
@@ -1137,6 +1289,9 @@ async function handleSaveQuestion() {
         } else {
             showToast('Error saving: ' + (err.message || 'Unknown error'), 'error');
         }
+    } finally {
+        isSavingQuestion = false;
+        setSaveProgress(false);
     }
 }
 
@@ -1175,24 +1330,24 @@ function reRenderSingleQuestion(question) {
                 ${question.status === 'Completed' ? `<div class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded mt-1 inline-block">Completed</div>` : question.isEdited ? `<div class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded mt-1 inline-block">Edited</div>` : ''}
             </div>
 
-            <button class="edit-btn text-[#FF6B00] text-sm font-semibold hover:underline" data-qid="${escapeHTML(question.displayId)}">
+            <button class="edit-btn orange-button text-white text-xs font-semibold px-3 py-1.5 rounded-md" data-qid="${escapeHTML(question.displayId)}">
                 Edit
             </button>
         </div>
 
         <div class="mb-3 font-medium">
-            Q: ${escapeHTML(question.question)}
+            Q: ${formatForDisplay(question.question)}
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
-            <div>A) ${escapeHTML(question.options.A)}</div>
-            <div>B) ${escapeHTML(question.options.B)}</div>
-            <div>C) ${escapeHTML(question.options.C)}</div>
-            <div>D) ${escapeHTML(question.options.D)}</div>
+            <div>A) ${formatForDisplay(question.options.A)}</div>
+            <div>B) ${formatForDisplay(question.options.B)}</div>
+            <div>C) ${formatForDisplay(question.options.C)}</div>
+            <div>D) ${formatForDisplay(question.options.D)}</div>
         </div>
 
         <div class="bg-gray-50 p-3 rounded text-sm mb-3">
-            <strong>Explanation:</strong> ${escapeHTML(question.explanation)}
+            <strong>Explanation:</strong> ${formatForDisplay(question.explanation)}
         </div>
 
         ${question.isEdited && Object.keys(question.changes).length > 0 ? renderChangesSection(question.changes) : ''}
@@ -1238,13 +1393,13 @@ function reRenderSingleQuestion(question) {
 
 async function handleReviewQuestion() {
     if (!currentUser) { showToast('Please log in.', 'error'); return; }
+    if (isReviewingQuestion) return;
 
     try {
-        const comment = prompt('Enter your review comment (optional):');
-        if (comment === null) return;
-
+        isReviewingQuestion = true;
+        setReviewProgress(true, 'Marking question as complete...');
         const questionId = window.currentQuestionId;
-        await reviewQuestion(questionId, comment || '');
+        await reviewQuestion(questionId, '');
         showToast('Question marked as complete!', 'success');
 
         const q = questions.find(q => q.id === questionId);
@@ -1259,6 +1414,9 @@ async function handleReviewQuestion() {
     } catch (err) {
         console.error('Error reviewing question:', err);
         showToast('Error: ' + err.message, 'error');
+    } finally {
+        isReviewingQuestion = false;
+        setReviewProgress(false);
     }
 }
 
@@ -1312,55 +1470,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
-// Fallback for window.onload if DOMContentLoaded doesn't trigger
-window.onload = async () => {
-    const isProtected = isProtectedPage();
-    
-    if (isProtected) {
-        const hasAuth = enforceAuthentication();
-        if (hasAuth) {
-            await checkAuthentication();
-            loadQBs();
-        }
-    }
-};
-async function handleSignup(event) {
-    event.preventDefault();
 
-    const username = document.getElementById("signupUsername")?.value.trim();
-    const email = document.getElementById("signupEmail")?.value.trim();
-    const role = document.getElementById("signupRole")?.value;
-
-    if (!username || !email) {
-        alert("Please fill all fields");
-        return;
-    }
-
-    try {
-        const res = await fetch(`${API_BASE}/auth/signup`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                username: username,
-                email: email,
-                role: role
-            })
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-            throw new Error(data.error || "Signup failed");
-        }
-
-        alert("Signup successful! Please login.");
-        window.location.href = "login.html";
-
-    } catch (err) {
-        console.error("Signup error:", err);
-        alert("Signup failed: " + err.message);
-    }
-}
 
 // =====================================================
 // BATCH PUSH TO RTU
@@ -1463,13 +1573,7 @@ async function handleBatchPush() {
     }
 }
 
-// Attach signup form listener if present
-document.addEventListener("DOMContentLoaded", () => {
-    const signupForm = document.getElementById("signupForm");
-    if (signupForm) {
-        signupForm.addEventListener("submit", handleSignup);
-    }
-});
+
 
 
 // =====================================================
